@@ -182,12 +182,12 @@ macro_rules! newtype_index {
         impl Idx for $type {
             #[inline]
             fn new(value: usize) -> Self {
-                Self::from(value)
+                Self::from_usize(value)
             }
 
             #[inline]
             fn index(self) -> usize {
-                usize::from(self)
+                self.as_usize()
             }
         }
 
@@ -400,7 +400,7 @@ macro_rules! newtype_index {
     (@decodable $type:ident) => (
         impl ::rustc_serialize::Decodable for $type {
             fn decode<D: ::rustc_serialize::Decoder>(d: &mut D) -> Result<Self, D::Error> {
-                d.read_u32().map(Self::from)
+                d.read_u32().map(Self::from_u32)
             }
         }
     );

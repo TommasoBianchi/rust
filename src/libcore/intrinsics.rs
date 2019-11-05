@@ -696,6 +696,11 @@ extern "rust-intrinsic" {
     /// This will statically either panic, or do nothing.
     pub fn panic_if_uninhabited<T>();
 
+    /// A guard for unsafe functions that cannot ever be executed if `T` does not permit
+    /// zero-initialization: This will statically either panic, or do nothing.
+    #[cfg(not(bootstrap))]
+    pub fn panic_if_non_zero<T>();
+
     /// Gets a reference to a static `Location` indicating where it was called.
     #[cfg(not(bootstrap))]
     pub fn caller_location() -> &'static crate::panic::Location<'static>;

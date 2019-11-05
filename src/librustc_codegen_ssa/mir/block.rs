@@ -529,11 +529,30 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         };
 
         // Emit a panic or a no-op for `panic_if_uninhabited`.
-        if intrinsic == Some("panic_if_uninhabited") {
+        // These are intrinsics that compile to panics so that we can get a message
+        // which mentions the offending type, even from a const context.
+        #[derive(Debug, PartialEq)]
+        enum PanicIntrinsic { IfUninhabited, IfNonZero };
+        let panic_intrinsic = intrinsic.and_then(|i| match i {
+            "panic_if_uninhabited" => Some(PanicIntrinsic::IfUninhabited),
+            "panic_if_non_zero" => Some(PanicIntrinsic::IfNonZero),
+            _ => None
+        });
+        if let Some(intrinsic) = panic_intrinsic {
+            use PanicIntrinsic::*;
             let ty = instance.unwrap().substs.type_at(0);
             let layout = bx.layout_of(ty);
-            if layout.abi.is_uninhabited() {
-                let msg_str = format!("Attempted to instantiate uninhabited type {}", ty);
+            let do_panic = match intrinsic {
+                IfUninhabited => layout.abi.is_uninhabited(),
+                IfNonZero => !layout.might_permit_zero_init(&bx).unwrap(), // error type is `!`
+            };
+            if do_panic {
+                let msg_str = if layout.abi.is_uninhabited() {
+                    // Use this error even for IfNonZero as it is more precise.
+                    format!("attempted to instantiate uninhabited type `{}`", ty)
+                } else {
+                    format!("attempted to zero-initialize non-zero type `{}`", ty)
+                };
                 let msg = bx.const_str(Symbol::intern(&msg_str));
                 let location = self.get_caller_location(&mut bx, span).immediate();
 

@@ -1004,6 +1004,7 @@ impl<'a, Ty> Deref for TyLayout<'a, Ty> {
     }
 }
 
+/// Trait for context types that can compute layouts of things.
 pub trait LayoutOf {
     type Ty;
     type TyLayout;
@@ -1011,6 +1012,39 @@ pub trait LayoutOf {
     fn layout_of(&self, ty: Self::Ty) -> Self::TyLayout;
     fn spanned_layout_of(&self, ty: Self::Ty, _span: Span) -> Self::TyLayout {
         self.layout_of(ty)
+    }
+}
+
+/// The `TyLayout` above will always be a `MaybeResult<TyLayout<'_, Self>>`.
+/// We can't add the bound due to the lifetime, but this trait is still useful when
+/// writing code that's generic over the `LayoutOf` impl.
+pub trait MaybeResult<T> {
+    type Error;
+
+    fn from(x: Result<T, Self::Error>) -> Self;
+    fn to_result(self) -> Result<T, Self::Error>;
+}
+
+impl<T> MaybeResult<T> for T {
+    type Error = !;
+
+    fn from(x: Result<T, Self::Error>) -> Self {
+        let Ok(x) = x;
+        x
+    }
+    fn to_result(self) -> Result<T, Self::Error> {
+        Ok(self)
+    }
+}
+
+impl<T, E> MaybeResult<T> for Result<T, E> {
+    type Error = E;
+
+    fn from(x: Result<T, Self::Error>) -> Self {
+        x
+    }
+    fn to_result(self) -> Result<T, Self::Error> {
+        self
     }
 }
 
@@ -1055,10 +1089,14 @@ impl<'a, Ty> TyLayout<'a, Ty> {
     where Ty: TyLayoutMethods<'a, C>, C: LayoutOf<Ty = Ty> {
         Ty::for_variant(self, cx, variant_index)
     }
+
+    /// Callers might want to use `C: LayoutOf<Ty=Ty, TyLayout: MaybeResult<Self>>`
+    /// to allow recursion (see `might_permit_zero_init` below for an example).
     pub fn field<C>(self, cx: &C, i: usize) -> C::TyLayout
     where Ty: TyLayoutMethods<'a, C>, C: LayoutOf<Ty = Ty> {
         Ty::field(self, cx, i)
     }
+
     pub fn pointee_info_at<C>(self, cx: &C, offset: Size) -> Option<PointeeInfo>
     where Ty: TyLayoutMethods<'a, C>, C: LayoutOf<Ty = Ty> {
         Ty::pointee_info_at(self, cx, offset)
@@ -1080,5 +1118,58 @@ impl<'a, Ty> TyLayout<'a, Ty> {
             Abi::Uninhabited => self.size.bytes() == 0,
             Abi::Aggregate { sized } => sized && self.size.bytes() == 0
         }
+    }
+
+    /// Determines if zero-initializing this type might be okay.
+    /// This is conservative: in doubt, it will answer `true`.
+    pub fn might_permit_zero_init<C, E>(
+        &self,
+        cx: &C,
+    ) -> Result<bool, E>
+    where
+        Self: Copy,
+        Ty: TyLayoutMethods<'a, C>,
+        C: LayoutOf<Ty = Ty, TyLayout: MaybeResult<Self, Error = E>>
+    {
+        fn scalar_allows_zero(s: &Scalar) -> bool {
+            (*s.valid_range.start() <= 0) || // `&& *s.valid_range.end() >= 0` would be redundant
+            (*s.valid_range.start() > *s.valid_range.end()) // wrap-around allows 0
+        }
+
+        // Abi is the most informative here.
+        let res = match &self.abi {
+            Abi::Uninhabited => false, // definitely UB
+            Abi::Scalar(s) => scalar_allows_zero(s),
+            Abi::ScalarPair(s1, s2) =>
+                scalar_allows_zero(s1) && scalar_allows_zero(s2),
+            Abi::Vector { element: s, count } =>
+                *count == 0 || scalar_allows_zero(s),
+            Abi::Aggregate { .. } => {
+                // For aggregates, recurse.
+                let inner = match self.variants {
+                    Variants::Multiple { .. } => // FIXME: get variant with "0" discriminant.
+                        return Ok(true),
+                    Variants::Single { index } => self.for_variant(&cx, index),
+                };
+
+                match inner.fields {
+                    FieldPlacement::Union(..) => true, // An all-0 unit is fine.
+                    FieldPlacement::Array { .. } =>
+                        // FIXME: The widely use smallvec 0.6 creates uninit arrays
+                        // with any element type, so let us not (yet) complain about that.
+                        // count == 0 || inner.field(cx, 0).to_result()?.might_permit_zero_init(cx)?
+                        true,
+                    FieldPlacement::Arbitrary { ref offsets, .. } =>
+                        // Check that all fields accept zero-init.
+                        (0..offsets.len()).try_fold(true, |accu, idx|
+                            Ok(accu &&
+                              inner.field(cx, idx).to_result()?.might_permit_zero_init(cx)?
+                            )
+                        )?
+                }
+            }
+        };
+        trace!("might_permit_zero_init({:?}) = {}", self.details, res);
+        Ok(res)
     }
 }
