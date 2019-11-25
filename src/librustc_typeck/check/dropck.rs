@@ -306,19 +306,8 @@ impl TypeRelation<'tcx> for Relator<'tcx> {
     }
 
     fn tys(&mut self, a: Ty<'tcx>, b: Ty<'tcx>) -> RelateResult<'tcx, Ty<'tcx>> {
-        match (&a.kind, &b.kind) {
-            (_, &ty::Infer(_)) | (&ty::Infer(_), _) => {
-                // Forbid inference variables during the dropck.
-                bug!("unexpected inference var {:?}", b)
-            }
-
-            _ => {
-                debug!("tys(a={:?}, b={:?})", a, b);
-
-                // Will also handle unification of `IntVar` and `FloatVar`.
-                self.tcx.infer_ctxt().enter(|infcx| infcx.super_combine_tys(self, a, b))
-            }
-        }
+        debug!("Relator::tys(a={:?}, b={:?})", a, b);
+        ty::relate::super_relate_tys(self, a, b)
     }
 
     fn regions(
@@ -336,8 +325,8 @@ impl TypeRelation<'tcx> for Relator<'tcx> {
         a: &'tcx ty::Const<'tcx>,
         b: &'tcx ty::Const<'tcx>,
     ) -> RelateResult<'tcx, &'tcx ty::Const<'tcx>> {
-        // TODO: should I check for ty::ConstType::Infer ?
-        self.tcx.infer_ctxt().enter(|infcx| infcx.super_combine_consts(self, a, b))
+        debug!("Relator::consts(a={:?}, b={:?})", a, b);
+        ty::relate::super_relate_consts(self, a, b)
     }
 
     fn binders<T>(
@@ -348,7 +337,11 @@ impl TypeRelation<'tcx> for Relator<'tcx> {
     where
         T: Relate<'tcx>,
     {
-        debug!("binders({:?}: {:?}", a, b);
+        debug!("Relator::binders({:?}: {:?}", a, b);
+
+        let anon_a = self.tcx.anonymize_late_bound_regions(a);
+        let anon_b = self.tcx.anonymize_late_bound_regions(b);
+        self.relate(anon_a.skip_binder(), anon_b.skip_binder())?;
 
         self.relate(a.skip_binder(), b.skip_binder())?;
 
