@@ -216,10 +216,18 @@ fn ensure_drop_predicates_are_implied_by_item_defn<'tcx>(
         // the analysis together via the fulfill , rather than the
         // repeated `contains` calls.
 
-        if !assumptions_in_impl_context.iter().any(|p: &'_ Predicate<'_>| {
-            let mut relator = Relator::new(tcx, self_param_env);
-            predicate_matches(predicate, p, &mut relator)
-        }) {
+        let predicate_matches_closure = |p: &'_ Predicate<'tcx>| {
+            let mut relator: Relator<'tcx> = Relator::new(tcx, self_param_env);
+            match (predicate, p) {
+                (Predicate::Trait(a), Predicate::Trait(b)) => relator.relate(a, b).is_ok(),
+                (Predicate::Projection(a), Predicate::Projection(b)) => {
+                    relator.relate(a, b).is_ok()
+                }
+                _ => predicate == p,
+            }
+        };
+
+        if !assumptions_in_impl_context.iter().any(predicate_matches_closure) {
             let item_span = tcx.hir().span(self_type_hir_id);
             struct_span_err!(
                 tcx.sess,
@@ -239,38 +247,6 @@ fn ensure_drop_predicates_are_implied_by_item_defn<'tcx>(
     }
 
     result
-}
-
-fn predicate_matches<'a>(
-    p1: &'_ Predicate<'a>,
-    p2: &'_ Predicate<'a>,
-    relator: &mut Relator<'a>,
-) -> bool {
-    // let combine_fields = CombineFields {
-    //     infcx: infer_ctx,
-    //     trace: TypeTrace::dummy(tcx),
-    //     cause: None,
-    //     self_param_env,
-    //     obligations: PredicateObligations::new(),
-    // };
-    match (p1, p2) {
-        (Predicate::Trait(a), Predicate::Trait(b)) => relate_predicates(relator, a, b),
-        (Predicate::Projection(a), Predicate::Projection(b)) => relate_predicates(relator, a, b),
-        _ => p1 == p2,
-    }
-}
-
-fn relate_predicates<T: Relate<'a>>(relator: &mut Relator<'a>, a: &T, b: &T) -> bool {
-    match relator.relate(a, b) {
-        Ok(v) => {
-            debug!("Ok(value) - {:?}", v);
-            true
-        }
-        Err(e) => {
-            debug!("Err(e) - {:?}", e);
-            false
-        }
-    }
 }
 
 /// This function is not only checking that the dropck obligations are met for
@@ -360,18 +336,8 @@ impl TypeRelation<'tcx> for Relator<'tcx> {
         a: &'tcx ty::Const<'tcx>,
         b: &'tcx ty::Const<'tcx>,
     ) -> RelateResult<'tcx, &'tcx ty::Const<'tcx>> {
-        match (a.val, b.val) {
-            // (ty::ConstKind::Infer(_), _) => {
-            //     // Forbid inference variables.
-            //     bug!("unexpected inference var {:?}", a)
-            // }
-
-            // (_, ty::ConstKind::Infer(_)) => {
-            //     // Forbid inference variables.
-            //     bug!("unexpected inference var {:?}", b)
-            // }
-            _ => self.tcx.infer_ctxt().enter(|infcx| infcx.super_combine_consts(self, a, b)),
-        }
+        // TODO: should I check for ty::ConstType::Infer ?
+        self.tcx.infer_ctxt().enter(|infcx| infcx.super_combine_consts(self, a, b))
     }
 
     fn binders<T>(
