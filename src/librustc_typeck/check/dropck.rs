@@ -7,6 +7,7 @@ use rustc::infer::outlives::env::OutlivesEnvironment;
 use rustc::infer::{InferOk, SuppressRegionErrors};
 use rustc::middle::region;
 use rustc::traits::{ObligationCause, TraitEngine, TraitEngineExt};
+use rustc::ty::error::TypeError;
 use rustc::ty::relate::{Relate, RelateResult, TypeRelation};
 use rustc::ty::subst::{Subst, SubstsRef};
 use rustc::ty::{self, Predicate, Ty, TyCtxt};
@@ -193,14 +194,13 @@ fn ensure_drop_predicates_are_implied_by_item_defn<'tcx>(
     let assumptions_in_impl_context = generic_assumptions.instantiate(tcx, &self_to_impl_substs);
     let assumptions_in_impl_context = assumptions_in_impl_context.predicates;
 
+    let self_param_env = tcx.param_env(self_type_did);
+
     // An earlier version of this code attempted to do this checking
     // via the traits::fulfill machinery. However, it ran into trouble
     // since the fulfill machinery merely turns outlives-predicates
     // 'a:'b and T:'b into region inference constraints. It is simpler
     // just to look for all the predicates directly.
-
-    ///////////////////////////////
-    let self_param_env = tcx.param_env(self_type_did);
 
     assert_eq!(dtor_predicates.parent, None);
     for (predicate, _) in dtor_predicates.predicates {
@@ -216,8 +216,16 @@ fn ensure_drop_predicates_are_implied_by_item_defn<'tcx>(
         // the analysis together via the fulfill , rather than the
         // repeated `contains` calls.
 
+        // This closure is a more robust way to check `Predicate` equality
+        // than simple `==` checks (which were the previous implementation).
+        // It relies on `ty::relate` for `TraitPredicate` and `ProjectionPredicate`
+        // (which implement the Relate trait), while delegating on simple equality
+        // for the other `Predicate`.
+        // This implementation solves (Issue #59497) and (Issue #58311).
+        // It is unclear to me at the moment whether the approach based on `relate`
+        // could be extended easily also to the other `Predicate`.
         let predicate_matches_closure = |p: &'_ Predicate<'tcx>| {
-            let mut relator: Relator<'tcx> = Relator::new(tcx, self_param_env);
+            let mut relator: DropckRelator<'tcx> = DropckRelator::new(tcx, self_param_env);
             match (predicate, p) {
                 (Predicate::Trait(a), Predicate::Trait(b)) => relator.relate(a, b).is_ok(),
                 (Predicate::Projection(a), Predicate::Projection(b)) => {
@@ -268,18 +276,21 @@ crate fn check_drop_obligations<'a, 'tcx>(
     Ok(())
 }
 
-crate struct Relator<'tcx> {
+// This is an implementation of the TypeRelation trait with the
+// aim of simply comparing for equality (without side-effects).
+// It is not intended to be used anywhere else other than here.
+crate struct DropckRelator<'tcx> {
     tcx: TyCtxt<'tcx>,
     param_env: ty::ParamEnv<'tcx>,
 }
 
-impl<'tcx> Relator<'tcx> {
-    fn new(tcx: TyCtxt<'tcx>, param_env: ty::ParamEnv<'tcx>) -> Relator<'tcx> {
-        Relator { tcx, param_env }
+impl<'tcx> DropckRelator<'tcx> {
+    fn new(tcx: TyCtxt<'tcx>, param_env: ty::ParamEnv<'tcx>) -> DropckRelator<'tcx> {
+        DropckRelator { tcx, param_env }
     }
 }
 
-impl TypeRelation<'tcx> for Relator<'tcx> {
+impl TypeRelation<'tcx> for DropckRelator<'tcx> {
     fn tcx(&self) -> TyCtxt<'tcx> {
         self.tcx
     }
@@ -289,7 +300,7 @@ impl TypeRelation<'tcx> for Relator<'tcx> {
     }
 
     fn tag(&self) -> &'static str {
-        "dropck::Relator"
+        "dropck::DropckRelator"
     }
 
     fn a_is_expected(&self) -> bool {
@@ -302,11 +313,13 @@ impl TypeRelation<'tcx> for Relator<'tcx> {
         a: &T,
         b: &T,
     ) -> RelateResult<'tcx, T> {
+        // Here we ignore variance because we require drop impl's types
+        // to be *exactly* the same as to the ones in the struct definition.
         self.relate(a, b)
     }
 
     fn tys(&mut self, a: Ty<'tcx>, b: Ty<'tcx>) -> RelateResult<'tcx, Ty<'tcx>> {
-        debug!("Relator::tys(a={:?}, b={:?})", a, b);
+        debug!("DropckRelator::tys(a={:?}, b={:?})", a, b);
         ty::relate::super_relate_tys(self, a, b)
     }
 
@@ -315,9 +328,19 @@ impl TypeRelation<'tcx> for Relator<'tcx> {
         a: ty::Region<'tcx>,
         b: ty::Region<'tcx>,
     ) -> RelateResult<'tcx, ty::Region<'tcx>> {
-        debug!("regions(a={:?}, b={:?})", a, b);
+        debug!("DropckRelator::regions(a={:?}, b={:?})", a, b);
 
-        Ok(a)
+        // We can just equate the regions because LBRs have been
+        // already anonymized.
+        if a == b {
+            Ok(a)
+        } else {
+            // I'm not sure is this `TypeError` is the right one, but
+            // it should not matter as it won't be checked (the dropck
+            // will emit its own, more informative and higher-level errors
+            // in case anything goes wrong).
+            Err(TypeError::RegionsPlaceholderMismatch)
+        }
     }
 
     fn consts(
@@ -325,7 +348,7 @@ impl TypeRelation<'tcx> for Relator<'tcx> {
         a: &'tcx ty::Const<'tcx>,
         b: &'tcx ty::Const<'tcx>,
     ) -> RelateResult<'tcx, &'tcx ty::Const<'tcx>> {
-        debug!("Relator::consts(a={:?}, b={:?})", a, b);
+        debug!("DropckRelator::consts(a={:?}, b={:?})", a, b);
         ty::relate::super_relate_consts(self, a, b)
     }
 
@@ -337,13 +360,13 @@ impl TypeRelation<'tcx> for Relator<'tcx> {
     where
         T: Relate<'tcx>,
     {
-        debug!("Relator::binders({:?}: {:?}", a, b);
+        debug!("DropckRelator::binders({:?}: {:?}", a, b);
 
+        // Anonymizing the LBRs is necessary to solve (Issue #59497).
+        // After we do so, it should be totally fine to skip the binders.
         let anon_a = self.tcx.anonymize_late_bound_regions(a);
         let anon_b = self.tcx.anonymize_late_bound_regions(b);
         self.relate(anon_a.skip_binder(), anon_b.skip_binder())?;
-
-        self.relate(a.skip_binder(), b.skip_binder())?;
 
         Ok(a.clone())
     }
