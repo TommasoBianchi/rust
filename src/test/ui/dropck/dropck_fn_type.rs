@@ -1,6 +1,8 @@
 // run-pass
 //! Regression test for #58311, regarding the usage of Fn types in drop impls
 
+// All of this Drop impls should compile.
+
 #[allow(dead_code)]
 struct S<F: Fn() -> [u8; 1]>(F);
 
