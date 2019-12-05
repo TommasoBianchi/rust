@@ -225,7 +225,7 @@ fn ensure_drop_predicates_are_implied_by_item_defn<'tcx>(
         // It is unclear to me at the moment whether the approach based on `relate`
         // could be extended easily also to the other `Predicate`.
         let predicate_matches_closure = |p: &'_ Predicate<'tcx>| {
-            let mut relator: DropckRelator<'tcx> = DropckRelator::new(tcx, self_param_env);
+            let mut relator: SimpleEqRelation<'tcx> = SimpleEqRelation::new(tcx, self_param_env);
             match (predicate, p) {
                 (Predicate::Trait(a), Predicate::Trait(b)) => relator.relate(a, b).is_ok(),
                 (Predicate::Projection(a), Predicate::Projection(b)) => {
@@ -279,18 +279,18 @@ crate fn check_drop_obligations<'a, 'tcx>(
 // This is an implementation of the TypeRelation trait with the
 // aim of simply comparing for equality (without side-effects).
 // It is not intended to be used anywhere else other than here.
-crate struct DropckRelator<'tcx> {
+crate struct SimpleEqRelation<'tcx> {
     tcx: TyCtxt<'tcx>,
     param_env: ty::ParamEnv<'tcx>,
 }
 
-impl<'tcx> DropckRelator<'tcx> {
-    fn new(tcx: TyCtxt<'tcx>, param_env: ty::ParamEnv<'tcx>) -> DropckRelator<'tcx> {
-        DropckRelator { tcx, param_env }
+impl<'tcx> SimpleEqRelation<'tcx> {
+    fn new(tcx: TyCtxt<'tcx>, param_env: ty::ParamEnv<'tcx>) -> SimpleEqRelation<'tcx> {
+        SimpleEqRelation { tcx, param_env }
     }
 }
 
-impl TypeRelation<'tcx> for DropckRelator<'tcx> {
+impl TypeRelation<'tcx> for SimpleEqRelation<'tcx> {
     fn tcx(&self) -> TyCtxt<'tcx> {
         self.tcx
     }
@@ -300,7 +300,7 @@ impl TypeRelation<'tcx> for DropckRelator<'tcx> {
     }
 
     fn tag(&self) -> &'static str {
-        "dropck::DropckRelator"
+        "dropck::SimpleEqRelation"
     }
 
     fn a_is_expected(&self) -> bool {
@@ -319,7 +319,7 @@ impl TypeRelation<'tcx> for DropckRelator<'tcx> {
     }
 
     fn tys(&mut self, a: Ty<'tcx>, b: Ty<'tcx>) -> RelateResult<'tcx, Ty<'tcx>> {
-        debug!("DropckRelator::tys(a={:?}, b={:?})", a, b);
+        debug!("SimpleEqRelation::tys(a={:?}, b={:?})", a, b);
         ty::relate::super_relate_tys(self, a, b)
     }
 
@@ -328,7 +328,7 @@ impl TypeRelation<'tcx> for DropckRelator<'tcx> {
         a: ty::Region<'tcx>,
         b: ty::Region<'tcx>,
     ) -> RelateResult<'tcx, ty::Region<'tcx>> {
-        debug!("DropckRelator::regions(a={:?}, b={:?})", a, b);
+        debug!("SimpleEqRelation::regions(a={:?}, b={:?})", a, b);
 
         // We can just equate the regions because LBRs have been
         // already anonymized.
@@ -348,7 +348,7 @@ impl TypeRelation<'tcx> for DropckRelator<'tcx> {
         a: &'tcx ty::Const<'tcx>,
         b: &'tcx ty::Const<'tcx>,
     ) -> RelateResult<'tcx, &'tcx ty::Const<'tcx>> {
-        debug!("DropckRelator::consts(a={:?}, b={:?})", a, b);
+        debug!("SimpleEqRelation::consts(a={:?}, b={:?})", a, b);
         ty::relate::super_relate_consts(self, a, b)
     }
 
@@ -360,7 +360,7 @@ impl TypeRelation<'tcx> for DropckRelator<'tcx> {
     where
         T: Relate<'tcx>,
     {
-        debug!("DropckRelator::binders({:?}: {:?}", a, b);
+        debug!("SimpleEqRelation::binders({:?}: {:?}", a, b);
 
         // Anonymizing the LBRs is necessary to solve (Issue #59497).
         // After we do so, it should be totally fine to skip the binders.
